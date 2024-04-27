@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -15,7 +16,7 @@ import (
 
 func main() {
 
-	hostName := flag.String("hostname", "localhost", "hostname/ip of the server")
+	hostName := flag.String("hostname", "192.168.133.48", "hostname/ip of the server")
 	portNum := flag.String("port", "4242", "port number of the server")
 	//numEcho := flag.Int("necho", 100, "number of echos")
 	timeoutDuration := flag.Int("rtt", 1000, "timeout duration (in ms)")
@@ -31,7 +32,7 @@ func main() {
 
 	session, err := quic.DialAddr(context.Background(), addr, tlsConf, nil)
 	if err != nil {
-		panic(err)
+		fmt.Println(session, "\n", addr, "\n", tlsConf, "\n")
 	}
 
 	stream, err := session.OpenStreamSync(context.Background())
