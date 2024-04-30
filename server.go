@@ -11,12 +11,15 @@ import (
 	"io"
 	"log"
 	"math/big"
+	"os"
+	"sync"
+	"time"
 
 	"github.com/quic-go/quic-go"
 )
 // this is Ilon Mask
 func main() {
-	hostName := flag.String("hostname", "localhost", "hostname/ip of the server")
+	hostName := flag.String("hostname", "192.168.249.48", "hostname/ip of the server")
 	portNum := flag.String("port", "4242", "port number of the server")
 
 	flag.Parse()
@@ -27,53 +30,108 @@ func main() {
 
 	listener, err := quic.ListenAddr(addr, generateTLSConfig(), nil)
 	if err != nil {
-		log.Println(err)
+		log.Fatal(err)
 	}
-	sess, err := listener.Accept(context.Background())
-	if err != nil {
-		log.Println(err)
-	}
+	defer listener.Close()
+
+	messageCh := make(chan []byte)
+
+	go broadcastMessages(messageCh)
 
 	for {
-		stream, err := sess.AcceptStream(context.Background())
+		sess, err := listener.Accept(context.Background())
 		if err != nil {
 			log.Println(err)
+			continue
 		}
 
-		// Echo through the loggingWriter
-		_, err = io.Copy(loggingWriter{stream}, stream)
+		go handleSession(sess, messageCh)
 	}
 }
 
-// A wrapper for io.Writer that also logs the message.
-type loggingWriter struct{ io.Writer }
+func handleSession(sess quic.Connection, messageCh chan<- []byte) {
+	defer sess.CloseWithError(0, "")
+	defer log.Println("Session closed")
 
-func (w loggingWriter) Write(b []byte) (int, error) {
-	msg := string(b)
+	stream, err := sess.AcceptStream(context.Background())
+	if err != nil {
+		log.Println(err)
+		return
+	}
+	defer stream.Close()
 
-	log.Printf("Server: Got '%s'", msg)
-	log.Printf("Server: Sending '%s'", msg)
+	log.Println("Stream opened")
 
-	return w.Writer.Write(b)
+	// Add the client to the list of clients
+	clientMu.Lock()
+	clients[stream] = struct{}{}
+	clientMu.Unlock()
+
+	// Read from the stream and send messages to all clients
+	for {
+		buf := make([]byte, 1024)
+		n, err := stream.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				log.Println("Client disconnected")
+				return
+			}
+			log.Println(err)
+			return
+		}
+
+		message := buf[:n]
+		log.Printf("Received message: %s\n", message)
+
+		// Send the received message to all clients
+		messageCh <- message
+		os.Stdin.WriteString("")
+	}
 }
+
+func broadcastMessages(messageCh <-chan []byte) {
+	for {
+		select {
+		case message := <-messageCh:
+			clientMu.Lock()
+			for client := range clients {
+				if _, err := client.Write(message); err != nil {
+					log.Println("Error writing message to client:", err)
+				}
+
+			}
+			clientMu.Unlock()
+		}
+	}
+}
+
+var (
+	clients  = make(map[quic.Stream]struct{})
+	clientMu sync.Mutex
+)
 
 // Setup a bare-bones TLS config for the server
 func generateTLSConfig() *tls.Config {
 	key, err := rsa.GenerateKey(rand.Reader, 1024)
 	if err != nil {
-		log.Println(err)
+		log.Fatal(err)
 	}
-	template := x509.Certificate{SerialNumber: big.NewInt(1)}
+	template := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		NotBefore:    time.Now(),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+	}
 	certDER, err := x509.CreateCertificate(rand.Reader, &template, &template, &key.PublicKey, key)
 	if err != nil {
-		log.Println(err)
+		log.Fatal(err)
 	}
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		log.Println(err)
+		log.Fatal(err)
 	}
 	return &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
